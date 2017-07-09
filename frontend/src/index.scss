@@ -1,0 +1,25 @@
+body {
+    font-family: 'Lucida Sans', 'Lucida Sans Regular', 'Lucida Grande', 'Lucida Sans Unicode', Geneva, Verdana, sans-serif
+}
+.promise-button--loading,
+.link--loading {
+    background-color: silver;
+    color: gray;
+    cursor: wait;
+}
+
+.link--active {
+    font-weight: bold;
+}
+
+.video {
+    display: inline-block;
+}
+.video .img { 
+    width: 240px;
+    height: 134px;
+    background-position: center;  
+    background-size: 240px 180px; 
+    margin: 10px;
+    box-shadow: 1px 1px 5px rgba(0,0,0,.3);
+}
