@@ -8,16 +8,34 @@ import { createHash } from "crypto";
 // drive.auth();
 // drive.createFolder('foo').catch(err => console.error(err));
 var youtube = new Youtube(configDir);
-async function main() {
+
+async function updateYoutubeVideos() {
+    console.log(new Date(), 'updateYoutubeVideos');
     await youtube.auth();
-    for (var i = 0; i < 1000; i++) {
-        var d = new Date();
-        d.setDate(d.getDate() - i);
-        await request(youtube, '', d);
+    var d = new Date();
+    const [{ count }] = await query<{ count: number }[]>('SELECT count(id) as count FROM videos WHERE date = CURRENT_DATE');
+    if (count > 0) {
+        console.log('Nothing to find');
+    } else {
+        try {
+            await findAndAddVideosByDate(youtube, '', d);
+        } catch (err) {
+            console.error(err.stack);
+        }
+    }
+    try {
+        await updateAllVideoInfo();
+    } catch (err) {
+        console.error(err.stack);
+    }
+    try {
+        await updateCaptionIds();
+    } catch (err) {
+        console.error(err.stack);
     }
 }
 
-async function request(youtube: Youtube, pageToken: string, date: Date) {
+async function findAndAddVideosByDate(youtube: Youtube, pageToken: string, date: Date) {
     var afterDate = new Date(date.getTime());
     afterDate.setHours(0, 0, 0, 0);
     var beforeDate = new Date(date.getTime());
@@ -25,7 +43,7 @@ async function request(youtube: Youtube, pageToken: string, date: Date) {
     var params = {
         part: 'snippet',
         maxResults: 50,
-        order: 'viewCount',
+        // order: 'viewCount',
         pageToken: pageToken,
         publishedBefore: beforeDate.toJSON(),
         publishedAfter: afterDate.toJSON(),
@@ -37,9 +55,6 @@ async function request(youtube: Youtube, pageToken: string, date: Date) {
         regionCode: 'us',
         // topicId: '/m/02jjt,/m/098wr,/m/019_rr,/m/04rlf'
     };
-    // console.log(params);
-    // var hash = createHash('md5').update(JSON.stringify(params)).digest("hex").substr(0, 5);
-    // var tokenFilename = configDir + 'nextPageToken-' + hash + '.txt';
     var res = await youtube.search(params);
     var insert = [];
 
@@ -47,40 +62,33 @@ async function request(youtube: Youtube, pageToken: string, date: Date) {
         var item = res.items[i];
         insert.push([item.id.videoId, item.snippet.channelId, item.snippet.title, date]);
     }
-    if (insert.length) {
+    if (insert.length > 0) {
         await query('INSERT IGNORE INTO videos (ytId, ytChannelId, title, date) VALUES ?', [insert] as any);
     } else {
     }
     console.log(date.toJSON().split('T').shift() + ' inserted ' + insert.length);
     if (insert.length === 50) {
-        await request(youtube, res.nextPageToken, date);
+        await findAndAddVideosByDate(youtube, res.nextPageToken, date);
     }
 }
 
-async function list() {
+async function updateAllVideoInfo() {
     await youtube.auth();
-    for (var i = 0; i < 1000; i++) {
-        var promises = [];
-        var rows = await query<{ ytId: string }[]>('SELECT ytId FROM videos WHERE views IS NULL LIMIT 2500');
-        if (rows.length == 0) {
-            console.log('done');
-            return;
-        }
-        for (var j = 0; j < 50; j++) {
-            var sliced = rows.slice(j * 50, (j + 1) * 50);
-            promises.push(getList(sliced.map(row => row.ytId)));
-        }
-        try {
-            await Promise.all(promises);
-        } catch (err) {
-            console.error(err);
+    var promises = [];
+    var rows = await query<{ ytId: string }[]>('SELECT ytId FROM videos WHERE infoUpdatedAt IS NULL OR (ADDDATE(infoUpdatedAt, DATEDIFF(NOW(), date) / 10) < CURRENT_DATE)');
+    console.log('updateAllVideoInfo', rows.length);
+    while (rows.length > 0) {
+        var sliced = rows.slice(0, 50);
+        rows = rows.slice(50);
+        if (sliced.length > 0) {
+            promises.push(updateVideoInfo(sliced.map(row => row.ytId)));
         }
     }
+    await Promise.all(promises);
 }
 
-async function getList(ids: string[]) {
+async function updateVideoInfo(ids: string[]) {
     if (ids.length === 0) return;
-    console.log('getList', ids.length);
     var q = '';
     var data = await youtube.videosList({
         id: ids.join(),
@@ -92,21 +100,26 @@ async function getList(ids: string[]) {
         var item = data.items[i];
         var stat = item.statistics;
         var topics = item.topicDetails ? (item.topicDetails.relevantTopicIds || []) : [];
-        q += 'UPDATE videos SET topic1=?, topic2=?, topic3=?, categoryId=?, views=?, likes=?, dislikes=?, favorites=?, comments=?, duration=?, defaultLanguage=?, defaultAudioLanguage=? WHERE ytId=?;\n'
+        q += 'UPDATE videos SET infoUpdatedAt=NOW(), topic1=?, topic2=?, topic3=?, categoryId=?, views=?, likes=?, dislikes=?, favorites=?, comments=?, duration=?, defaultLanguage=?, defaultAudioLanguage=? WHERE ytId=?;\n'
         values.push(topics[1], topics[2], topics[3], item.categoryId, stat.viewCount, stat.likeCount, stat.dislikeCount, stat.favoritesCount, stat.commentCount, parseTime(item.contentDetails.duration), item.snippet.defaultLanguage, item.snippet.defaultAudioLanguage, item.id);
     }
     // console.log(values);
-    await query(q, values);
+    if (values.length > 0) {
+        await query(q, values);
+    }
 }
 
 
-async function captionList() {
+async function updateCaptionIds() {
     await youtube.auth();
-    var rows = await query<any>('SELECT ytId FROM videos WHERE good = 1 and ytASRCaptionId IS NULL AND ytEnCaptionId IS NULL');
-    for (var i = 0; i < rows.length; i += 1) {
+    var rows = await query<any>('SELECT ytId FROM videos WHERE defaultAudioLanguage in ("en", "en-CA", "en-GB", "en-IE", "en-US") and likes > 10 and views > 500 and (likes/dislikes > 5 OR dislikes = 0) and duration < 1200 AND captionUpdatedAt IS NULL');
+    console.log('updateCaptionIds', rows.length);
+    while (rows.length > 0) {
+        var sliced = rows.slice(0, 50);
+        rows = rows.slice(50);
         var promises = [];
-        for (var j = 0; j < 1; j++) {
-            promises.push(getCaptions(rows[i + j].ytId));
+        for (var j = 0; j < sliced.length; j++) {
+            promises.push(updateCaption(sliced[j].ytId));
         }
         try {
             await Promise.all(promises);
@@ -117,8 +130,7 @@ async function captionList() {
 }
 
 
-async function getCaptions(videoId: string) {
-    console.log(videoId);
+async function updateCaption(videoId: string) {
     var data = await youtube.captionList({ part: 'snippet', videoId });
     // await captionDownload(row.ytId);
     let ytEnCaptionId, ytASRCaptionId;
@@ -128,16 +140,13 @@ async function getCaptions(videoId: string) {
         if (snippet.language.match(/^(en|en-CA|en-GB|en-IE|en-US)$/)) {
             if (item.snippet.trackKind === 'ASR') {
                 ytASRCaptionId = item.id;
-                // await captionDownload(item.id);
             } else {
                 ytEnCaptionId = item.id;
             }
         } else {
-            // console.log(snippet.language);
         }
     }
-    await query('UPDATE videos SET ytEnCaptionId=?, ytASRCaptionId=? WHERE ytId=?', [ytEnCaptionId, ytASRCaptionId, videoId]);
-    // console.log(data.items);
+    await query('UPDATE videos SET ytEnCaptionId=?, ytASRCaptionId=?, captionUpdatedAt = NOW() WHERE ytId=?', [ytEnCaptionId, ytASRCaptionId, videoId]);
 }
 
 
@@ -162,5 +171,6 @@ function parseTime(input: string) {
     return totalseconds;
 }
 
-// list().catch(err => console.error(err.stack));
-captionList().catch(err => console.error(err.stack));
+
+updateYoutubeVideos().catch(err => console.error(err.stack));
+// updateCaptionIds().catch(err => console.error(err.stack));
