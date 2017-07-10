@@ -17,8 +17,9 @@ packer.run({watch: true});
 app.use(router.routes());
 app.use(router.allowedMethods());
 
-router.get('/api/videos/', async (ctx, next) => {
-    var videos = await query('SELECT * FROM videos WHERE good=1 LIMIT 100');
+router.get('/api/videos/:date/', async (ctx, next) => {
+    var date = ctx.params.date;
+    var videos = await query('SELECT * FROM videos WHERE ytEnCaptionId IS NOT NULL AND date = ? ORDER BY views DESC', [date]);
     ctx.body = videos;
 }) 
 
